@@ -1,0 +1,255 @@
+//@version=4
+strategy(title="Double Bollinger Bands + Lagerre + RSI + Stochcastic + Candles Confirm", shorttitle="DbB, Lagerre, RSI, Stoch, Candles", overlay=true)
+
+// ---------------------------------------------------------------------------//
+// Input parameters
+// ---------------------------------------------------------------------------//
+
+i_startTime = input(defval = timestamp("01 Jan 2000 13:30 +0000"), title = "Fecha inicio", type = input.time)
+inDateRange = time >= i_startTime
+
+//Medias moviles
+mm_switch1=input(true, title="Enable Bar Color?")
+mm_switch2=input(true, title="Show Fast Moving Average")
+mm_switch3=input(true, title="Show Slow Moving Average")
+mm_fast = input(50, title="Fast Moving Average")
+mm_slow = input(200, title="Slow Moving Average")
+
+//Stochcastic
+st_switch = input(true, title="Enable Stochastic?")
+st_periodK = input(defval=14, title="Stoch K", minval=1)
+st_periodD = input(defval=3, title="Stoch D", minval=1)
+st_smoothK = input(defval=3, title="Stoch Smooth", minval=1)
+st_crossmiddle = input(defval=false, title="Stoch Middle Cross Signal", type=input.bool)
+st_lowerBand = input(defval=20, title="Stoch Lower Band", minval=5, maxval=30)
+st_upperBand = input(defval=80, title="Stoch Upper Band", minval=40, maxval=95)
+
+//RSI
+rsi_switch = input(true, title="Enable RSI?")
+rsi_len = input(14, minval=1, title="RSI Length")
+rsi_src = input(close, "RSI Source", type = input.source)
+
+//Bollinger bands
+bb_fast_length = input(20, title="Fast BB lenght", minval=1)
+bb_slow_length = input(84, title="Slow BB lenght", minval=1)
+bb_dev1 = input(1.00, minval=0.01, maxval=50, step=0.25, title="StdDev BB Low")
+bb_dev2 = input(2.00, minval=0.01, maxval=50, step=0.25, title="StdDev BB High")
+bb_offset = input(0, title="Offset BB", type = input.integer, minval = -500, maxval = 500)
+
+//Parabolic SAR
+ps_switch = input(false, title="Enable Parabolic SAR?")
+ps_start = input(2, minval=0, maxval=10, title="Start - Default = 2 - Multiplied by .01")
+ps_increment = input(2, minval=0, maxval=10, title="Step Setting (Sensitivity) - Default = 2 - Multiplied by .01" )
+ps_maximum = input(2, minval=1, maxval=10, title="Maximum Step (Sensitivity) - Default = 2 - Multiplied by .10")
+ps_sus = input(false, "Show Up Trending Parabolic Sar")
+ps_sds = input(false, "Show Down Trending Parabolic Sar")
+ps_disc = input(false, title="Start and Step settings are *.01 so 2 = .02 etc, Maximum Step is *.10 so 2 = .2")
+//"------Step Setting Definition------"
+//"A higher step moves SAR closer to the price action, which makes a reversal more likely."
+//"The indicator will reverse too often if the step is set too high."
+
+//"------Maximum Step Definition-----")
+//"The sensitivity of the indicator can also be adjusted using the Maximum Step."
+//"While the Maximum Step can influence sensitivity, the Step carries more weight"
+//"because it sets the incremental rate-of-increase as the trend develops"
+lg_pctile = input(90, title="Percentile Threshold Extreme Value, Exceeding Creates Colored Histogram")
+lg_wrnpctile = input(70, title="Percentile Threshold Warning Value, Exceeding Creates Colored Histogram")
+lg_col_tileT = input(#b71c1c, title="Percentile Threshold High Value", type=input.color)
+lg_col_tileB = input(#4caf51, title="Percentile Threshold Low Value", type=input.color)
+lg_col_tileN = input(color.new(#5d606b, 50), title="Percentile Threshold Neutral Value", type=input.color)
+lg_Short = input(0.4, title="PPO Setting")
+lg_Long = input(0.8, title="PPO Setting")
+lg_lkbT = input(200,title="Look Back Period For 'Tops' Percent Rank is based off of?")
+lg_lkbB = input(200,title="Look Back Period For 'Bottoms' Percent Rank is based off of?")
+
+
+//Candles strategy
+cd_lSMA = input(defval=5, title='Candle length SMA', type=input.integer, minval=1, maxval=200, step=1)
+cd_UpTrend = input(defval=3, title='Candles Up to confirm trend', type=input.integer, minval=0, maxval=10, step=1)
+cd_DownTrend = input(defval=3, title='Candles Down to confirm trend', type=input.integer, minval=0, maxval=10, step=1)
+
+
+// ---------------------------------------------------------------------------//
+// Calcs & Plots
+// ---------------------------------------------------------------------------//
+
+var st_previousSignal = 'None'
+var cd_previousSignal = 'None'
+
+patternLabelPosLow = low - (atr(30) * 0.6)
+patternLabelPosHigh = high + (atr(30) * 0.6)
+
+label_color_bullish = color.new(color.olive, 50)
+label_color_bearish = color.new(color.orange, 50)
+
+
+// SMAs
+movingaverage_fast = sma(close, mm_fast)
+movingaverage_slow = sma(close, mm_slow)
+bullish_cross = crossover(movingaverage_fast, movingaverage_slow)
+bearish_cross = crossunder(movingaverage_fast, movingaverage_slow)
+change_slow = change(movingaverage_slow)
+bartrendcolor = close > movingaverage_fast and close > movingaverage_slow and change_slow > 0 ? color.green : close < movingaverage_fast and close < movingaverage_slow and change_slow < 0 ? color.red : color.blue
+barcolor(mm_switch1 ? bartrendcolor : na)
+plot(mm_switch2?movingaverage_fast : na, "SMA Fast", color = change(movingaverage_fast) > 0 ? color.green : color.red,linewidth=2)
+plot(mm_switch3?movingaverage_slow : na, "SMA Slow", color = change(movingaverage_slow) > 0 ? color.green : color.red,linewidth=2)
+
+//Laguerre PPO Code from TheLark
+lag(g, p) =>
+    L0=0.0, L0 := (1 - g)*p+g*nz(L0[1])
+    L1=0.0, L1 := -g*L0+nz(L0[1])+g*nz(L1[1])
+    L2=0.0, L2 := -g*L1+nz(L1[1])+g*nz(L2[1])
+    L3=0.0, L3 := -g*L2+nz(L2[1])+g*nz(L3[1])
+    (L0 + 2*L1 + 2*L2 + L3)/6
+
+colorTransp(col, transp) =>
+    red = color.r(col)
+    green = color.g(col)
+    blue = color.b(col)
+    color.rgb(red, green, blue, transp)
+
+lg_lmas = lag(lg_Short, hl2)
+lg_lmal = lag(lg_Long, hl2)
+
+lg_pctileB = lg_pctile * -1
+lg_wrnpctileB = lg_wrnpctile * -1
+
+//PPO Plot
+lg_ppoT = (lg_lmas-lg_lmal)/lg_lmal*100
+lg_ppoB = (lg_lmal-lg_lmas)/lg_lmal*100
+//PercentRank of PPO 
+lg_pctRankT = int(percentrank(lg_ppoT, lg_lkbT))
+lg_pctRankB = int(percentrank(lg_ppoB, lg_lkbB) * -1)
+//Color Definition of Columns
+lg_colT = lg_pctRankT >= lg_pctile ? color.from_gradient(lg_pctRankT, 80, 100, color.new(lg_col_tileT, 50), lg_col_tileT) : color.from_gradient(lg_pctRankT, 0, 80, lg_col_tileN, color.new(lg_col_tileT, 50))
+bb_col_up = colorTransp(lg_colT, 100-(lg_pctRankT/3))
+bb_col_line_up = colorTransp(lg_colT, 100-(lg_pctRankT/2))
+lg_colB = lg_pctRankB <= lg_pctileB ? color.from_gradient(lg_pctRankB*-1, 80, 100, color.new(lg_col_tileB, 50), lg_col_tileB) : color.from_gradient(lg_pctRankB*-1, 0, 80, lg_col_tileN, color.new(lg_col_tileB, 50))
+bb_col_down = colorTransp(lg_colB, 100-(lg_pctRankB/-3))
+bb_col_line_down = colorTransp(lg_colB, 100-(lg_pctRankB/-2))
+
+// Slow bollinger bandsc
+bb_slow_basis = sma(close, bb_slow_length)
+bb_slow_dev1 = bb_dev1 * stdev(close, bb_slow_length)
+bb_slow_dev2 = bb_dev2 * stdev(close, bb_slow_length)
+
+bb_slow_upper1 = bb_slow_basis + bb_slow_dev1
+bb_slow_upper2 = bb_slow_basis + bb_slow_dev2
+bb_slow_upper_d2 = plot(bb_slow_upper2, "Slow BB up ext", color=bb_col_line_up, offset = bb_offset)
+bb_slow_upper_d1 = plot(bb_slow_upper1, "Slow BB up int", color=bb_col_line_up, offset = bb_offset)
+fill(bb_slow_upper_d2, bb_slow_upper_d1, title = "Slow Fill BB up", color=bb_col_up)
+
+bb_slow_lower1 = bb_slow_basis - bb_slow_dev1
+bb_slow_lower2 = bb_slow_basis - bb_slow_dev2
+bb_slow_lower_d1 = plot(bb_slow_lower1, "Slow BB low int", color=bb_col_line_down, offset = bb_offset)
+bb_slow_lower_d2 = plot(bb_slow_lower2, "Slow BB low ext", color=bb_col_line_down, offset = bb_offset)
+fill(bb_slow_lower_d2, bb_slow_lower_d1, title = "Slow Fill BB low", color=bb_col_down)
+
+// Fast bollinger bands
+bb_fast_basis = sma(close, bb_fast_length)
+bb_fast_dev1 = bb_dev1 * stdev(close, bb_fast_length)
+bb_fast_dev2 = bb_dev2 * stdev(close, bb_fast_length)
+
+bb_fast_upper1 = bb_fast_basis + bb_fast_dev1
+bb_fast_upper2 = bb_fast_basis + bb_fast_dev2
+bb_fast_upper_d2 = plot(bb_fast_upper2, "Fast BB up ext", color=bb_col_line_up, offset = bb_offset)
+bb_fast_upper_d1 = plot(bb_fast_upper1, "Fast BB up int", color=bb_col_line_up, offset = bb_offset)
+fill(bb_fast_upper_d2, bb_fast_upper_d1, title = "Fast Fill BB up", color=bb_col_up)
+
+bb_fast_lower1 = bb_fast_basis - bb_fast_dev1
+bb_fast_lower2 = bb_fast_basis - bb_fast_dev2
+bb_fast_lower_d1 = plot(bb_fast_lower1, "Fast BB low int", color=bb_col_line_down, offset = bb_offset)
+bb_fast_lower_d2 = plot(bb_fast_lower2, "Fast BB low ext", color=bb_col_line_down, offset = bb_offset)
+fill(bb_fast_lower_d2, bb_fast_lower_d1, title = "Fast Fill BB low", color=bb_col_down)
+
+// Parabolic SAR
+ps_startCalc = ps_start * .01
+ps_incrementCalc = ps_increment * .01
+ps_maximumCalc = ps_maximum * .10
+ps_sarUp = sar(ps_startCalc, ps_incrementCalc, ps_maximumCalc)
+ps_sarDown = sar(ps_startCalc, ps_incrementCalc, ps_maximumCalc)
+ps_colUp = close >= ps_sarDown ? color.lime : na
+ps_colDown = close <= ps_sarUp ? color.red : na
+plot(ps_switch and ps_sus and ps_sarUp ? ps_sarUp : na, title="Up Trending SAR", style=plot.style_circles, linewidth=2,color=ps_colUp)
+plot(ps_switch and ps_sds and ps_sarDown ? ps_sarDown : na, title="Up Trending SAR", style=plot.style_circles, linewidth=2,color=ps_colDown)
+
+// RSI
+if rsi_switch
+    rsi_calc = rsi(rsi_src, rsi_len)
+    if crossunder(rsi_calc, 30)
+        label.new(bar_index, patternLabelPosLow, text="R", style=label.style_label_up, color = label_color_bullish, textcolor=color.white, tooltip = 'RSI enter buy')
+    if crossover(rsi_calc, 70)
+        label.new(bar_index, patternLabelPosHigh, text="R", style=label.style_label_down, color = label_color_bearish, textcolor=color.white, tooltip = 'RSI enter sell')
+    if crossover(rsi_calc, 30)
+        label.new(bar_index, patternLabelPosLow, text="R", style=label.style_label_up, color = label_color_bullish, textcolor=color.white, tooltip = 'RSI exit buy')
+    if crossunder(rsi_calc, 70)
+        label.new(bar_index, patternLabelPosHigh, text="R", style=label.style_label_down, color = label_color_bearish, textcolor=color.white, tooltip = 'RSI exit sell')
+
+// Schotastic
+st_buySignal = false
+st_sellSignal = false
+
+if st_switch
+    st_k = sma(stoch(close, high, low, st_periodK), st_smoothK)
+    st_d = sma(st_k, st_periodD)
+    
+    // Si la linea azul (k) corta la linea roja hacia abajo y se encuentra por debajo de 20 o si cruza hacia arriba el unbral de 50
+    st_buySignal := (((st_k < st_lowerBand) and crossover(st_k, st_d)) or ( st_crossmiddle ? crossover(st_k, 50) : false)) and ( close < movingaverage_slow )
+    if st_buySignal
+        label.new(bar_index, patternLabelPosLow, text="S", style=label.style_label_up, color = label_color_bullish, textcolor=color.white, tooltip = 'Stoch buy signal')
+
+    // Si la linea azul (k) corta la linea roja hacia arriba y se encuentra por ancima de 80 o si cruza hacia abajo el unbral de 50
+    st_sellSignal := (((st_k > st_upperBand) and crossover(st_k, st_d)) or ( st_crossmiddle ? crossunder(st_k, 50) : false)) and ( close > movingaverage_slow )
+    if st_sellSignal
+        label.new(bar_index, patternLabelPosHigh, text="S", style=label.style_label_down, color = label_color_bearish, textcolor=color.white, tooltip = 'Stoch sell signal')
+
+//if st_buySignal and previousSignal != 'Buy' and inDateRange
+//    strategy.entry("Compra", strategy.long)
+//if st_sellSignal and st_previousSignal != 'Sell' and inDateRange
+//    strategy.close_all()
+
+//Candles strategy
+cd_sma = sma(hlc3, cd_lSMA)
+cd_s_up = barssince(close <= cd_sma) //Cantidad de velas verdes por encima de la media movil
+cd_s_down = barssince(open >= cd_sma) //Cantidad de velas rojas por debajo de la media movil
+
+plot(cd_sma, title="SMA Short term", color=cd_s_up >= 3 ? color.lime : cd_s_down >= 3 ? color.red : na, linewidth=2, style=plot.style_linebr)
+
+cd_buySignal = cd_s_up >= 3 and ( lg_pctRankB >= lg_wrnpctile ) and (bb_fast_lower2 <= bb_slow_lower1)
+if cd_buySignal
+    label.new(bar_index, patternLabelPosLow, text="C", style=label.style_label_up, color = label_color_bullish, textcolor=color.white, tooltip = 'Candle buy signal')
+//plotshape(cd_buySignal ? low  : na, title="Candle Buy Signal", text="Cdl", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(color.green, 50), textcolor=color.white)
+strategy.entry("long", strategy.long, when=cd_buySignal and inDateRange)
+
+cd_sellSignal = cd_s_down >= 3 and ( lg_pctRankT >= lg_wrnpctile ) and (bb_fast_upper2 >= bb_slow_upper1)
+if cd_sellSignal
+    label.new(bar_index, patternLabelPosHigh, text="C", style=label.style_label_down, color = label_color_bearish, textcolor=color.white, tooltip = 'Candle sell signal')
+//plotshape(cd_sellSignal ? high  : na, title="Candle Sell Signal", text="Cdl", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 50), textcolor=color.white)
+strategy.close("long", when=cd_sellSignal and inDateRange)
+
+// Intersect of upper bollinger bands
+//intersect(x1, x2, y1, y2) => 
+//    ((x1 <= y2) and (y1 <= x2))
+
+//bgcolor(bb_fast_upper2 >= bb_slow_upper1 ? color.new(color.red, 90) : na, title="Intersect upper BB")
+//bgcolor(bb_fast_lower2 <= bb_slow_lower1 ? color.new(color.lime, 90) : na, title="Intersect lower BB")
+
+// Strategy
+//if bullish_cross
+//    strategy.entry("long", strategy.long)
+//
+//strategy.close("long", when = bearish_cross )
+
+//plotshape(bullish_cross ? low : na, title="Señal de compra", text="SMA GC", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white, transp=50)
+//plotshape(bearish_cross ? high : na, title="Señal de venta", text="SMA DC", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white, transp=50)
+
+if st_buySignal
+    st_previousSignal := 'Buy'
+if st_sellSignal
+    st_previousSignal := 'Sell'
+
+if cd_buySignal
+    cd_previousSignal := 'Buy'
+if cd_sellSignal
+    cd_previousSignal := 'Sell'
+    
